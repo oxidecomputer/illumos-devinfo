@@ -1,0 +1,9 @@
+[package]
+name = "illumos-devinfo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0.62"
+libc = "0.2.132"
+num_enum = "0.5.7"
