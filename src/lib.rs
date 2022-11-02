@@ -1,5 +1,4 @@
 #![cfg(target_os = "illumos")]
-#![allow(unused_imports)]
 #![allow(unused)]
 
 use anyhow::{bail, Result};
@@ -53,10 +52,7 @@ extern "C" {
     fn di_init(phys_path: *const c_char, flag: c_uint) -> *mut DiNode;
     fn di_fini(root: *mut DiNode);
 
-    fn di_drv_first_node(
-        drv_name: *const c_char,
-        root: *mut DiNode,
-    ) -> *mut DiNode;
+    fn di_drv_first_node(drv_name: *const c_char, root: *mut DiNode) -> *mut DiNode;
     fn di_drv_next_node(node: *mut DiNode) -> *mut DiNode;
 
     fn di_parent_node(node: *mut DiNode) -> *mut DiNode;
@@ -109,8 +105,7 @@ fn string_props(node: *mut DiNode) -> BTreeMap<String, String> {
             continue;
         }
 
-        let name =
-            unsafe { CStr::from_ptr(di_prop_name(prop)) }.to_string_lossy();
+        let name = unsafe { CStr::from_ptr(di_prop_name(prop)) }.to_string_lossy();
         let val = unsafe { CStr::from_ptr(data) }.to_string_lossy();
 
         out.insert(name.to_string(), val.to_string());
@@ -137,7 +132,7 @@ impl DevInfo {
 
     pub fn walk_driver(&mut self, name: &str) -> DriverWalk {
         DriverWalk {
-           parent: self,
+            parent: self,
             driver: name.to_string(),
             node: DI_NODE_NIL,
             fin: false,
@@ -180,7 +175,10 @@ impl<'a> Iterator for NodeWalk<'a> {
              * Visit the root node first.
              */
             self.node = self.parent.root;
-            return Some(Ok(Node { parent: self.parent, node: self.node }));
+            return Some(Ok(Node {
+                parent: self.parent,
+                node: self.node,
+            }));
         }
 
         if self.skip_children {
@@ -199,7 +197,10 @@ impl<'a> Iterator for NodeWalk<'a> {
                  * Yes.  Visit the first child.
                  */
                 self.node = child;
-                return Some(Ok(Node { parent: self.parent, node: self.node }));
+                return Some(Ok(Node {
+                    parent: self.parent,
+                    node: self.node,
+                }));
             }
         }
 
@@ -212,7 +213,10 @@ impl<'a> Iterator for NodeWalk<'a> {
              * Visit this sibling.
              */
             self.node = sib;
-            return Some(Ok(Node { parent: self.parent, node: self.node }));
+            return Some(Ok(Node {
+                parent: self.parent,
+                node: self.node,
+            }));
         }
 
         /*
@@ -232,7 +236,10 @@ impl<'a> Iterator for NodeWalk<'a> {
                  * Visit this node.
                  */
                 self.node = sib;
-                return Some(Ok(Node { parent: self.parent, node: self.node }));
+                return Some(Ok(Node {
+                    parent: self.parent,
+                    node: self.node,
+                }));
             }
         }
     }
@@ -270,7 +277,10 @@ impl<'a> Iterator for DriverWalk<'a> {
             return None;
         }
 
-        Some(Ok(Node { parent: self.parent, node: self.node }))
+        Some(Ok(Node {
+            parent: self.parent,
+            node: self.node,
+        }))
     }
 }
 
@@ -360,7 +370,10 @@ impl<'a> Iterator for PropertyWalk<'a> {
             return None;
         }
 
-        Some(Ok(Property { parent: self.parent, prop: self.prop }))
+        Some(Ok(Property {
+            parent: self.parent,
+            prop: self.prop,
+        }))
     }
 }
 
