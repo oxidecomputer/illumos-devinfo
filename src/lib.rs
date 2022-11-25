@@ -284,7 +284,19 @@ impl<'a> Iterator for DriverWalk<'a> {
     }
 }
 
-impl Node<'_> {
+impl<'a> Node<'a> {
+    pub fn parent(&self) -> Option<Node<'a>> {
+        let node = unsafe { di_parent_node(self.node) };
+        if node == DI_NODE_NIL {
+            return None;
+        }
+
+        Some(Node {
+            parent: self.parent,
+            node,
+        })
+    }
+
     pub fn node_name(&self) -> String {
         unsafe { CStr::from_ptr(di_node_name(self.node)) }
             .to_string_lossy()
