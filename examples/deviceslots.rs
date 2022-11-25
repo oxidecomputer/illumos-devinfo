@@ -37,15 +37,15 @@ fn main() -> Result<()> {
                     if let Some(Ok(slot_prop)) = node.props().into_iter().find(|prop| {
                         if let Ok(prop) = prop {
                             prop.name() == "physical-slot#".to_string()
-                        } else { false }
+                        } else {
+                            false
+                        }
                     }) {
                         let slot = slot_prop.as_i64().expect("Expected i64");
                         let device = slot_to_device(slot).unwrap_or("Not found");
 
-                        device_descriptions.insert(
-                            slot,
-                            format!("{slot:>4}\t{device:>6}\t{devfs_path}")
-                        );
+                        device_descriptions
+                            .insert(slot, format!("{slot:>4}\t{device:>6}\t{devfs_path}"));
                         break;
                     }
                 }
