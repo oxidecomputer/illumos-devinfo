@@ -1,26 +1,35 @@
 #![cfg(target_os = "illumos")]
+#![allow(unused_imports)]
 #![allow(unused)]
 
 use anyhow::{bail, Result};
+use libc::___errno;
 use libc::c_void;
 use libc::time_t;
+use libc::ENXIO;
 use num_enum::TryFromPrimitive;
 use std::collections::BTreeMap;
 use std::convert::TryFrom;
+use std::ffi::OsStr;
 use std::ffi::{CStr, CString};
 use std::iter::Iterator;
-use std::os::raw::{c_char, c_int, c_uint};
+use std::os::raw::{c_char, c_int, c_uchar, c_uint};
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::slice::from_raw_parts;
 use std::slice::from_raw_parts_mut;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 enum DiNode {}
 enum DiProp {}
+enum DiMinor {}
+enum DiDevlinkHandle {}
+enum DiDevlink {}
 
 const DI_NODE_NIL: *mut DiNode = std::ptr::null_mut();
 const DI_PROP_NIL: *mut DiProp = std::ptr::null_mut();
+const DI_MINOR_NIL: *mut DiMinor = std::ptr::null_mut();
+const DI_LINK_NIL: *mut DiDevlinkHandle = std::ptr::null_mut();
 
 const DIIOC: c_uint = 0xDF << 8;
 const DINFOSUBTREE: c_uint = DIIOC | 0x01; /* include subtree */
@@ -33,7 +42,26 @@ const DINFOHP: c_uint = DIIOC | 0x400000; /* include hotplug info (?) */
 const DINFOCPYONE: c_uint = DIIOC; /* just a single node */
 const DINFOCPYALL: c_uint = DINFOSUBTREE | DINFOPROP | DINFOMINOR;
 
+/*
+ * These flags are Private:
+ */
+const DINFOPRIVDATA: c_uint = DIIOC | 0x10; /* include private data */
+const DINFOFORCE: c_uint = DIIOC | 0x20; /* force load all drivers */
+const DINFOCACHE: c_uint = DIIOC | 0x100000; /* use cached data  */
+const DINFOCLEANUP: c_uint = DIIOC | 0x200000; /* cleanup /etc/devices files */
+
 const DI_PROP_TYPE_STRING: c_int = 2;
+
+const DI_MAKE_LINK: c_uint = 0x01;
+
+const DI_PRIMARY_LINK: c_uint = 0x01;
+const DI_SECONDARY_LINK: c_uint = 0x02;
+const DI_LINK_TYPES: c_uint = 0x03;
+
+const DI_WALK_CONTINUE: c_int = 0;
+const DI_WALK_PRUNESIB: c_int = -1;
+const DI_WALK_PRUNECHILD: c_int = -2;
+const DI_WALK_TERMINATE: c_int = -3;
 
 #[derive(Debug, Eq, PartialEq, TryFromPrimitive)]
 #[repr(i32)]
@@ -69,11 +97,34 @@ extern "C" {
     fn di_prop_type(prop: *mut DiProp) -> c_int;
 
     fn di_prop_strings(prop: *mut DiProp, data: *const *const c_char) -> c_int;
+    fn di_prop_bytes(prop: *mut DiProp, data: *const *const c_uchar) -> c_int;
     fn di_prop_ints(prop: *mut DiProp, data: *const *const c_int) -> c_int;
     fn di_prop_int64(prop: *mut DiProp, data: *const *const i64) -> c_int;
 
     fn di_devfs_path(node: *mut DiNode) -> *mut c_char;
+    fn di_devfs_minor_path(minor: *mut DiMinor) -> *mut c_char;
     fn di_devfs_path_free(path_buf: *mut c_char);
+
+    fn di_minor_next(node: *mut DiNode, minor: *mut DiMinor) -> *mut DiMinor;
+    fn di_minor_name(minor: *mut DiMinor) -> *const c_char;
+    fn di_minor_nodetype(minor: *mut DiMinor) -> *const c_char;
+    fn di_minor_spectype(minor: *mut DiMinor) -> c_int;
+
+    fn di_devlink_init(name: *const c_char, flags: c_uint) -> *mut DiDevlinkHandle;
+    fn di_devlink_fini(hdlp: *mut DiDevlinkHandle);
+
+    fn di_devlink_walk(
+        hdl: *mut DiDevlinkHandle,
+        re: *const c_char,
+        mpath: *const c_char,
+        flags: c_uint,
+        arg: *mut c_void,
+        devlink_callback: unsafe extern "C" fn(*const DiDevlink, *mut c_void) -> c_int,
+    ) -> c_int;
+
+    fn di_devlink_path(devlink: *const DiDevlink) -> *const c_char;
+    fn di_devlink_content(devlink: *const DiDevlink) -> *const c_char;
+    fn di_devlink_type(devlink: *const DiDevlink) -> c_int;
 }
 
 pub struct DevInfo {
@@ -114,10 +165,14 @@ fn string_props(node: *mut DiNode) -> BTreeMap<String, String> {
 }
 
 impl DevInfo {
-    pub fn new_path<P: AsRef<Path>>(p: P) -> Result<Self> {
+    fn new_common<P: AsRef<Path>>(p: P, force_load: bool) -> Result<Self> {
         let path = CString::new(p.as_ref().as_os_str().as_bytes()).unwrap();
+        let mut flags = DINFOCPYALL;
+        if force_load {
+            flags |= DINFOFORCE;
+        }
 
-        let root = unsafe { di_init(path.as_ptr(), DINFOCPYALL) };
+        let root = unsafe { di_init(path.as_ptr(), flags) };
         if root == DI_NODE_NIL {
             let e = std::io::Error::last_os_error();
             bail!("di_init: {}", e);
@@ -126,8 +181,16 @@ impl DevInfo {
         Ok(DevInfo { root })
     }
 
+    pub fn new_path<P: AsRef<Path>>(p: P) -> Result<Self> {
+        Self::new_common(p, false)
+    }
+
     pub fn new() -> Result<Self> {
-        Self::new_path("/")
+        Self::new_common("/", false)
+    }
+
+    pub fn new_force_load() -> Result<Self> {
+        Self::new_common("/", true)
     }
 
     pub fn walk_driver(&mut self, name: &str) -> DriverWalk {
@@ -252,6 +315,7 @@ pub struct DriverWalk<'w> {
     fin: bool,
 }
 
+#[derive(Clone)]
 pub struct Node<'n> {
     parent: &'n DevInfo,
     node: *mut DiNode,
@@ -285,18 +349,6 @@ impl<'a> Iterator for DriverWalk<'a> {
 }
 
 impl<'a> Node<'a> {
-    pub fn parent(&self) -> Option<Node<'a>> {
-        let node = unsafe { di_parent_node(self.node) };
-        if node == DI_NODE_NIL {
-            return None;
-        }
-
-        Some(Node {
-            parent: self.parent,
-            node,
-        })
-    }
-
     pub fn node_name(&self) -> String {
         unsafe { CStr::from_ptr(di_node_name(self.node)) }
             .to_string_lossy()
@@ -347,6 +399,15 @@ impl<'a> Node<'a> {
         string_props(self.node)
     }
 
+    pub fn minors(&self) -> MinorWalk {
+        MinorWalk {
+            parent: self.parent,
+            node: self.node,
+            minor: DI_MINOR_NIL,
+            fin: false,
+        }
+    }
+
     pub fn depth(&self) -> u32 {
         let mut d = 0;
         let mut n = self.node;
@@ -358,6 +419,22 @@ impl<'a> Node<'a> {
             d += 1;
         }
         d
+    }
+
+    pub fn parent(&self) -> Result<Option<Node<'a>>> {
+        let n = unsafe { di_parent_node(self.node) };
+        if n == DI_NODE_NIL {
+            if unsafe { *___errno() } == ENXIO {
+                Ok(None)
+            } else {
+                bail!("{}", std::io::Error::last_os_error());
+            }
+        } else {
+            Ok(Some(Node {
+                parent: self.parent,
+                node: n,
+            }))
+        }
     }
 }
 
@@ -454,6 +531,21 @@ impl Property<'_> {
             _ => None,
         }
     }
+
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        match self.value_type() {
+            PropType::Byte => {
+                let mut data: *const c_uchar = std::ptr::null();
+                let n = unsafe { di_prop_bytes(self.prop, &mut data) };
+                if n >= 0 {
+                    Some(unsafe { std::slice::from_raw_parts(data, n.try_into().unwrap()) })
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Display for Property<'_> {
@@ -466,5 +558,200 @@ impl std::fmt::Display for Property<'_> {
             }
             _ => write!(f, "<?Property>"),
         }
+    }
+}
+
+pub struct MinorWalk<'p> {
+    parent: &'p DevInfo,
+    node: *mut DiNode,
+    minor: *mut DiMinor,
+    fin: bool,
+}
+
+impl<'a> Iterator for MinorWalk<'a> {
+    type Item = Result<Minor<'a>>;
+
+    fn next(&mut self) -> Option<Result<Minor<'a>>> {
+        if self.fin {
+            return None;
+        }
+
+        self.minor = unsafe { di_minor_next(self.node, self.minor) };
+        if self.minor == DI_MINOR_NIL {
+            self.fin = true;
+            return None;
+        }
+
+        Some(Ok(Minor {
+            parent: self.parent,
+            minor: self.minor,
+        }))
+    }
+}
+
+pub struct Minor<'p> {
+    parent: &'p DevInfo,
+    minor: *mut DiMinor,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum SpecType {
+    Char,
+    Block,
+}
+
+impl<'a> Minor<'a> {
+    pub fn name(&self) -> String {
+        unsafe { CStr::from_ptr(di_minor_name(self.minor)) }
+            .to_string_lossy()
+            .to_string()
+    }
+
+    pub fn node_type(&self) -> String {
+        unsafe { CStr::from_ptr(di_minor_nodetype(self.minor)) }
+            .to_string_lossy()
+            .to_string()
+    }
+
+    pub fn spec_type(&self) -> SpecType {
+        match unsafe { di_minor_spectype(self.minor) as libc::mode_t } {
+            libc::S_IFCHR => SpecType::Char,
+            libc::S_IFBLK => SpecType::Block,
+            other => panic!("unknown spectype 0x{:x}", other),
+        }
+    }
+
+    pub fn devfs_path(&self) -> Result<String> {
+        let p = unsafe { di_devfs_minor_path(self.minor) };
+        if p.is_null() {
+            let e = std::io::Error::last_os_error();
+            bail!("di_devfs_minor_path failed: {}", e);
+        }
+
+        let cs = unsafe { CStr::from_ptr(p) };
+        let s = cs.to_str().unwrap().to_string();
+        unsafe { di_devfs_path_free(p) };
+        Ok(s)
+    }
+}
+
+pub struct DevLinks {
+    handle: *mut DiDevlinkHandle,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DevLinkType {
+    Primary,
+    Secondary,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DevLink {
+    path: PathBuf,
+    content: PathBuf,
+    linktype: DevLinkType,
+}
+
+impl DevLink {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn target(&self) -> &Path {
+        &self.content
+    }
+
+    pub fn linktype(&self) -> DevLinkType {
+        self.linktype
+    }
+}
+
+extern "C" fn devlink_accumulate(link: *const DiDevlink, arg: *mut c_void) -> c_int {
+    let path = unsafe { di_devlink_path(link) };
+    let content = unsafe { di_devlink_content(link) };
+    let ltype = unsafe { di_devlink_type(link) } as u32;
+    if path.is_null()
+        || content.is_null()
+        || (ltype != DI_PRIMARY_LINK && ltype != DI_SECONDARY_LINK)
+    {
+        /*
+         * XXX Report an error, probably?
+         */
+        return DI_WALK_CONTINUE;
+    }
+
+    let mut out = unsafe { Box::from_raw(arg as *mut Vec<DevLink>) };
+
+    out.push(DevLink {
+        path: PathBuf::from(OsStr::from_bytes(
+            unsafe { CStr::from_ptr(path) }.to_bytes(),
+        )),
+        content: PathBuf::from(OsStr::from_bytes(
+            unsafe { CStr::from_ptr(content) }.to_bytes(),
+        )),
+        linktype: match ltype {
+            DI_PRIMARY_LINK => DevLinkType::Primary,
+            DI_SECONDARY_LINK => DevLinkType::Secondary,
+            other => panic!("what is link type 0x{:x}?", other),
+        },
+    });
+    assert_eq!(Box::into_raw(out) as *mut c_void, arg);
+
+    DI_WALK_CONTINUE
+}
+
+impl DevLinks {
+    fn new_common(make_link: bool) -> Result<DevLinks> {
+        let mut flags = 0;
+        if make_link {
+            flags |= DI_MAKE_LINK;
+        }
+
+        let handle = unsafe { di_devlink_init(std::ptr::null(), flags) };
+        if handle == DI_LINK_NIL {
+            let e = std::io::Error::last_os_error();
+            bail!("di_devlink_init: {}", e);
+        }
+
+        Ok(DevLinks { handle })
+    }
+
+    pub fn new(make_link: bool) -> Result<Self> {
+        Self::new_common(make_link)
+    }
+
+    pub fn links_for_path<P: AsRef<Path>>(&self, p: P) -> Result<Vec<DevLink>> {
+        let mut out: Box<Vec<DevLink>> = Default::default();
+        let arg = Box::into_raw(out);
+        let mpath = CString::new(p.as_ref().as_os_str().as_bytes()).unwrap();
+
+        let r = unsafe {
+            di_devlink_walk(
+                self.handle,
+                std::ptr::null(),
+                mpath.as_ptr(),
+                0,
+                arg as *mut c_void,
+                devlink_accumulate,
+            )
+        };
+
+        /*
+         * Make sure we get our boxed argument back so that it will be freed:
+         */
+        let mut out = unsafe { Box::from_raw(arg) };
+
+        if r != 0 {
+            let e = std::io::Error::last_os_error();
+            bail!("di_devlink_walk: {}", e);
+        }
+
+        Ok(out.to_vec())
+    }
+}
+
+impl Drop for DevLinks {
+    fn drop(&mut self) {
+        unsafe { di_devlink_fini(self.handle) };
     }
 }
