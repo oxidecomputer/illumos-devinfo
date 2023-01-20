@@ -111,7 +111,7 @@ extern "C" {
     fn di_minor_spectype(minor: *mut DiMinor) -> c_int;
 
     fn di_devlink_init(name: *const c_char, flags: c_uint) -> *mut DiDevlinkHandle;
-    fn di_devlink_fini(hdlp: &*mut DiDevlinkHandle) -> c_int;
+    fn di_devlink_fini(hdlp: *mut *mut DiDevlinkHandle) -> c_int;
 
     fn di_devlink_walk(
         hdl: *mut DiDevlinkHandle,
@@ -752,6 +752,6 @@ impl DevLinks {
 
 impl Drop for DevLinks {
     fn drop(&mut self) {
-        unsafe { di_devlink_fini(&self.handle) };
+        assert_eq!(unsafe { di_devlink_fini(&mut self.handle) }, 0);
     }
 }
